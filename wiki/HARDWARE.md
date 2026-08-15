@@ -4,7 +4,7 @@ Programming model for the guest machine: memory regions, memory-mapped I/O, grap
 
 All addresses are **16-bit word indices** unless noted. Values are 16-bit words. Region names in NuPy are `VOLATILE`, `DISK`, `VRAM`, `NPROG`, `SYSROM`.
 
-For the language that targets this machine, see [`docs/NuPy.md`](../docs/NuPy.md).
+For the language that targets this machine, see [`/NuPy.md`](/NuPy.md).
 
 ---
 

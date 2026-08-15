@@ -5511,7 +5511,7 @@ static void *stbi__bmp_parse_header(stbi__context *s, stbi__bmp_data *info)
          info->mg = stbi__get32le(s);
          info->mb = stbi__get32le(s);
          info->ma = stbi__get32le(s);
-         if (compress != 3) // override mr/mg/mb unless in BI_BITFIELDS mode, as per docs
+         if (compress != 3) // override mr/mg/mb unless in BI_BITFIELDS mode, as per wiki
             stbi__bmp_set_mask_defaults(info, compress);
          stbi__get32le(s); // discard color space
          for (i=0; i < 12; ++i)
