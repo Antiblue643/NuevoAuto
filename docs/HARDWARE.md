@@ -1,4 +1,4 @@
-# NuevoAuto Hardware Reference 
+# NuevoAuto Hardware Reference
 
 Programming model for the guest machine: memory regions, memory-mapped I/O, graphics (November), audio (Afterburner II), interrupts, input, disk filesystem, and SYSROM.
 
