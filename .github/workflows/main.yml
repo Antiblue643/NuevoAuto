@@ -1,22 +1,18 @@
-name: Sync Docs to Wiki
-
+name: Publish wiki
 on:
   push:
-    branches:
-      - main # Change to your default branch name if different
+    branches: [main]
     paths:
-      - 'docs/**' # Only runs when files in the docs folder change
-
+      - docs/**
+      - .github/workflows/publish-wiki.yml
+concurrency:
+  group: publish-wiki
+  cancel-in-progress: true
+permissions:
+  contents: write
 jobs:
-  sync-wiki:
+  publish-wiki:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # Grants permissions to update the wiki repository
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Sync to GitHub Wiki
-        uses: Andrew-Chen-Wang/github-wiki-action@v4
-        with:
-          path: docs # Tells the action to pull from your docs folder
+      - uses: actions/checkout@v7
+      - uses: Andrew-Chen-Wang/github-wiki-action@v5
