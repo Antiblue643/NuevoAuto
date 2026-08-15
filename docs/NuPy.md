@@ -1,4 +1,4 @@
-# NuPy
+# NuPy 
 
 **NuPy** is a restricted Python subset that compiles to NACPU machine code for the NuevoAuto virtual machine. Source files use the `.nupy` extension. The compiler (`compile.py`) turns them into either human-readable `.nu` assembly text or a raw little-endian uint16 binary (`.nub`).
 
