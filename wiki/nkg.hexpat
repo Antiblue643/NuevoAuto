@@ -15,7 +15,7 @@
 // Header: 5 words
 // Directory: 128 entries × 16 words starting at word 5
 // Data area: from word 2053 onward
- 
+
 import std.mem;
 import std.string;
 
