@@ -1,0 +1,3 @@
+// Windows exe icon (taskbar, Explorer, Alt-Tab, etc.)
+// Generated from emures/icon.png -> emures/icon.ico
+IDI_ICON1 ICON "../emures/icon.ico"

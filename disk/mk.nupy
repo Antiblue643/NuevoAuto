@@ -1,0 +1,480 @@
+from nupy import *
+from tools.nupy import execProgram, readString, setPSGVolume
+
+
+def init_hardware():
+    # Mask interrupts during boot
+    disableInterrupts()
+
+    cls()
+    wait(30)
+    cls()
+
+    # Enable interrupts before passing to OS
+    enableInterrupts()
+
+def boot():
+    init_hardware()
+    # Jump to OS
+    setActivePalette(0, 15)
+    setActivePalette(1, 4095)
+    kernel_main()
+
+def clear_cell(x, y):
+    # Erase a 8x8 character cell (set every pixel to color 0).
+    # Needed because put_tile only paints ON bits and never clears.
+    row = 0
+    while row < 8:
+        col = 0
+        while col < 8:
+            setPixel(x + col, y + row, 0)
+            col = col + 1
+        row = row + 1
+
+def put_tile(tile_idx, x, y):
+    # Draw a raw 8x8 font tile by index (0-255).
+    # Variable count is tight (max 11): reuse px as the on/off scratch.
+    if tile_idx < 0:
+        return
+    if tile_idx > 255:
+        return
+
+    row = 0
+    while row < 8:
+        font_addr = tile_idx * 8 + row
+        row_bits = read("SYSROM", font_addr)
+
+        mask = 128
+        col = 0
+        while col < 8:
+            px = row_bits & mask
+            if px != 0:
+                px = x + col
+                py = y + row
+                setPixel(px, py, 1)
+            mask = mask >> 1
+            col = col + 1
+        row = row + 1
+
+def put_char(char_code, x, y):
+    # Keymap is 128 entries at SYSROM 2048..2175.
+    # Each entry is either 0xFFFF (no glyph) or the tile index (0-255).
+    # Always clear the cell first so backspace / overwrite works.
+    clear_cell(x, y)
+    if char_code < 0:
+        return
+    if char_code > 127:
+        return
+
+    keymap_addr = 2048 + char_code
+    entry = read("SYSROM", keymap_addr)
+
+    if entry == 65535:
+        return
+
+    put_tile(entry, x, y)
+
+def draw_string(addr, length, x, y):
+    i = 0
+    pos = x
+    while i < length:
+        ch = read("VOLATILE", addr + i)
+        put_char(ch, pos, y)
+        pos = pos + 8
+        i += 1
+
+def next_line(y):
+    # Advance one text row (8 px). Wrap + clear at bottom of 240 px screen.
+    y = y + 8
+    if y + 8 > 240:
+        cls()
+        return 0
+    return y
+
+# ---------------------------------------------------------------------------
+# Command-line helpers
+# ---------------------------------------------------------------------------
+
+def first_word_len(addr, length):
+    i = 0
+    while i < length:
+        ch = read("VOLATILE", addr + i)
+        if ch == 32:
+            return i
+        i = i + 1
+    return length
+
+def skip_spaces(addr, start, length):
+    i = start
+    while i < length:
+        ch = read("VOLATILE", addr + i)
+        if ch != 32:
+            return i
+        i = i + 1
+    return length
+
+def hex_digit(ch):
+    # Return 0..15 for a valid hex digit character, else 255 (invalid).
+    if ch >= 48:
+        if ch <= 57:
+            return ch - 48
+    if ch >= 65:
+        if ch <= 70:
+            return ch - 55
+    if ch >= 97:
+        if ch <= 102:
+            return ch - 87
+    return 255
+
+def parse_hex(addr, length):
+    # Parse a hex string (no 0x prefix) from VOLATILE[addr..addr+length).
+    # Returns the 16-bit value, or 0xFFFF on empty/invalid input.
+    if length <= 0:
+        return 65535
+    val = 0
+    i = 0
+    while i < length:
+        d = hex_digit(read("VOLATILE", addr + i))
+        if d == 255:
+            return 65535
+        val = (val << 4) | d
+        val = val & 65535
+        i = i + 1
+    return val
+
+def region_code(name_addr, name_len):
+    # Map a region name token to a small integer:
+    #   0 = VOLATILE, 1 = DISK, 2 = VRAM, 3 = NPROG, 4 = SYSROM
+    #   255 = unknown
+    if name_len == 8:
+        if readString("VOLATILE", name_addr, name_len) == "VOLATILE":
+            return 0
+    if name_len == 4:
+        if readString("VOLATILE", name_addr, name_len) == "DISK":
+            return 1
+        if readString("VOLATILE", name_addr, name_len) == "VRAM":
+            return 2
+    if name_len == 5:
+        if readString("VOLATILE", name_addr, name_len) == "NPROG":
+            return 3
+    if name_len == 6:
+        if readString("VOLATILE", name_addr, name_len) == "SYSROM":
+            return 4
+    return 255
+
+def mem_read_by_code(code, addr):
+    if code == 0:
+        return read("VOLATILE", addr)
+    if code == 1:
+        return read("DISK", addr)
+    if code == 2:
+        return read("VRAM", addr)
+    if code == 3:
+        return read("NPROG", addr)
+    if code == 4:
+        return read("SYSROM", addr)
+    return 0
+
+def mem_write_by_code(code, addr, val):
+    # SYSROM is read-only; ignore writes to them.
+    if code == 0:
+        write("VOLATILE", addr, val)
+    if code == 1:
+        write("DISK", addr, val)
+    if code == 2:
+        write("VRAM", addr, val)
+    if code == 3:
+        write("NPROG", addr, val)
+
+def format_hex4(val, out_addr):
+    # Write exactly 4 uppercase hex digits of val into VOLATILE[out_addr..].
+    # Shift amounts must be compile-time constants, so unroll the four nibbles.
+    nibble = (val >> 12) & 15
+    ch = 48 + nibble
+    if nibble > 9:
+        ch = 55 + nibble
+    write("VOLATILE", out_addr, ch)
+
+    nibble = (val >> 8) & 15
+    ch = 48 + nibble
+    if nibble > 9:
+        ch = 55 + nibble
+    write("VOLATILE", out_addr + 1, ch)
+
+    nibble = (val >> 4) & 15
+    ch = 48 + nibble
+    if nibble > 9:
+        ch = 55 + nibble
+    write("VOLATILE", out_addr + 2, ch)
+
+    nibble = val & 15
+    ch = 48 + nibble
+    if nibble > 9:
+        ch = 55 + nibble
+    write("VOLATILE", out_addr + 3, ch)
+
+def do_poke(arg_addr, arg_len, out_y):
+    # poke <region> <addr_hex> <val_hex>
+    # Manual tokenization with first_word_len / skip_spaces.
+    # Locals: code, tmp, pos, end  (+ 3 params) = 7.
+    if arg_len <= 0:
+        writeString("VOLATILE", 0x1100, "usage: poke region addr val")
+        draw_string(0x1100, 28, 0, out_y)
+        frameBlit()
+        return out_y
+
+    end = arg_len
+
+    # token 0: region
+    tmp = first_word_len(arg_addr, end)
+    code = region_code(arg_addr, tmp)
+    if code == 255:
+        writeString("VOLATILE", 0x1100, "bad region")
+        draw_string(0x1100, 10, 0, out_y)
+        frameBlit()
+        return out_y
+    if code == 4:
+        writeString("VOLATILE", 0x1100, "SYSROM readonly")
+        draw_string(0x1100, 12, 0, out_y)
+        frameBlit()
+        return out_y
+
+    # token 1: address
+    pos = skip_spaces(arg_addr, tmp, end)
+    if pos >= end:
+        writeString("VOLATILE", 0x1100, "usage: poke region addr val")
+        draw_string(0x1100, 28, 0, out_y)
+        frameBlit()
+        return out_y
+    tmp = first_word_len(arg_addr + pos, end - pos)
+    arg_len = parse_hex(arg_addr + pos, tmp)
+    if arg_len == 65535:
+        writeString("VOLATILE", 0x1100, "bad address")
+        draw_string(0x1100, 11, 0, out_y)
+        frameBlit()
+        return out_y
+
+    # token 2: value
+    pos = skip_spaces(arg_addr, pos + tmp, end)
+    if pos >= end:
+        writeString("VOLATILE", 0x1100, "usage: poke region addr val")
+        draw_string(0x1100, 28, 0, out_y)
+        frameBlit()
+        return out_y
+    tmp = first_word_len(arg_addr + pos, end - pos)
+    arg_addr = parse_hex(arg_addr + pos, tmp)
+    if arg_addr == 65535:
+        writeString("VOLATILE", 0x1100, "bad value")
+        draw_string(0x1100, 9, 0, out_y)
+        frameBlit()
+        return out_y
+
+    mem_write_by_code(code, arg_len, arg_addr)
+    writeString("VOLATILE", 0x1100, "yep")
+    draw_string(0x1100, 3, 0, out_y)
+    com_beep()
+    frameBlit()
+    return out_y
+
+def do_peek(arg_addr, arg_len, out_y):
+    # peek <region> <addr_hex>
+    if arg_len <= 0:
+        writeString("VOLATILE", 0x1100, "usage: peek region addr")
+        draw_string(0x1100, 24, 0, out_y)
+        frameBlit()
+        return out_y
+
+    # token 0: region
+    tmp = first_word_len(arg_addr, arg_len)
+    code = region_code(arg_addr, tmp)
+    if code == 255:
+        writeString("VOLATILE", 0x1100, "bad region")
+        draw_string(0x1100, 10, 0, out_y)
+        frameBlit()
+        return out_y
+
+    # token 1: address
+    pos = skip_spaces(arg_addr, tmp, arg_len)
+    if pos >= arg_len:
+        writeString("VOLATILE", 0x1100, "usage: peek region addr")
+        draw_string(0x1100, 24, 0, out_y)
+        frameBlit()
+        return out_y
+    tmp = first_word_len(arg_addr + pos, arg_len - pos)
+    arg_len = parse_hex(arg_addr + pos, tmp)
+    if arg_len == 65535:
+        writeString("VOLATILE", 0x1100, "bad address")
+        draw_string(0x1100, 11, 0, out_y)
+        frameBlit()
+        return out_y
+
+    arg_addr = mem_read_by_code(code, arg_len)
+    format_hex4(arg_addr, 0x1100)
+    draw_string(0x1100, 4, 0, out_y)
+    com_beep()
+    frameBlit()
+    return out_y
+
+def com_beep():
+    setPSGVolume(15, 15, 0)
+    setPSGWaveform(0, 0, 0)
+    setPSGDuty(2, 0, 0)
+    setPSGTone(0, note_to_period("A5"))
+    wait(2)
+    setPSGVolume(15, 0, 0)
+
+def execute_command(cmd_addr, length, cursor_y):
+    # Parse "name [args...]". Output is drawn on the line below the command.
+    # Returns the Y of the last line used so the caller can place the next prompt.
+    #
+    name_len = first_word_len(cmd_addr, length)
+    arg_start = skip_spaces(cmd_addr, name_len, length)
+    arg_len = 0
+    if arg_start < length:
+        arg_len = length - arg_start
+
+    out_y = next_line(cursor_y)
+
+    if name_len == 4:
+        if readString("VOLATILE", cmd_addr, name_len) == "help":
+            writeString("VOLATILE", 0x1100, "help chime chr echo poke peek prog")
+            draw_string(0x1100, len("help chime chr echo poke peek prog"), 0, out_y)
+            com_beep()
+            frameBlit()
+            return out_y
+        if readString("VOLATILE", cmd_addr, name_len) == "echo":
+            if arg_len > 0:
+                arg_addr = cmd_addr + arg_start
+                com_beep()
+                draw_string(arg_addr, arg_len, 0, out_y)
+            frameBlit()
+            return out_y
+        if readString("VOLATILE", cmd_addr, name_len) == "poke":
+            return do_poke(cmd_addr + arg_start, arg_len, out_y)
+        if readString("VOLATILE", cmd_addr, name_len) == "peek":
+            return do_peek(cmd_addr + arg_start, arg_len, out_y)
+        if readString("VOLATILE", cmd_addr, name_len) == "prog":
+            if arg_len > 0:
+                if arg_len < 8:
+                    arg_addr = cmd_addr + arg_start
+                    com_beep()
+                    execProgram(readString("VOLATILE", arg_addr, 8))
+            return out_y
+
+    if name_len == 5:
+        if readString("VOLATILE", cmd_addr, name_len) == "chime":
+            chime()
+            frameBlit()
+            return cursor_y
+
+    if name_len == 3:
+        if readString("VOLATILE", cmd_addr, name_len) == "chr":
+            show_chr_atlas()
+            com_beep()
+            return 0
+
+    return cursor_y
+
+def show_chr_atlas():
+    # Full 256-tile font table (16x16 grid). Charmap only names 0..208;
+    # higher indices are blank or leftover from the spritesheet.
+    cls()
+    f = 0
+    while f < 256:
+        x = (f & 15) * 8
+        y = (f // 16) * 8
+        put_tile(f, x + 8, y)
+        f = f + 1
+    frameBlit()
+
+def chime():
+    setPSGVolume(15, 15, 0)
+    setPSGWaveform(0, 0, 0)
+
+    setPSGDuty(8, 0, 0)
+    setPSGTone(0, note_to_period("E4"))
+    wait(3)
+    setPSGDuty(6, 0, 0)
+    setPSGTone(0, note_to_period("A4"))
+    wait(3)
+    setPSGDuty(4, 0, 0)
+    setPSGTone(0, note_to_period("E5"))
+    wait(6)
+    setPSGVolume(0, 0, 0)
+
+def kernel_main():
+    cursor_y = 0
+    cmd_len = 0
+
+    # Command buffer allocated at 0x1000 in VOLATILE
+    cmd_base = 0x1000
+    cur_tile = 207
+
+    # Print initial prompt (return glyph) at column 0; text starts at 8.
+    clear_cell(0, 0)
+    put_tile(cur_tile, 0, 0)
+    cursor_x = 8
+
+    chime()
+
+    while 1:
+        # Poll primary keyboard slot at IO $8000
+        key = read("VOLATILE", 0x8000)
+
+        if key != 0:
+            # Capture, then clear the host latch so a sticky/held value
+            # cannot re-fire. Wait until the port stays zero for a couple
+            # of frames so host auto-repeat pulses are collapsed into one
+            # press.
+            write("VOLATILE", 0x8000, 0)
+            while read("VOLATILE", 0x8000) != 0:
+                write("VOLATILE", 0x8000, 0)
+                frameBlit()
+            # one extra quiet frame
+            frameBlit()
+            if read("VOLATILE", 0x8000) != 0:
+                write("VOLATILE", 0x8000, 0)
+                frameBlit()
+                # still noisy - skip this event
+                key = 0
+
+            # Enter key (ASCII 13)
+            if key == 13:
+                cursor_y = execute_command(cmd_base, cmd_len, cursor_y)
+
+                cursor_y = next_line(cursor_y)
+                clear_cell(0, cursor_y)
+                put_tile(cur_tile, 0, cursor_y)
+                cursor_x = 8
+                cmd_len = 0
+
+            # Backspace (ASCII 8)
+            elif key == 8:
+                if cmd_len > 0:
+                    cmd_len = cmd_len - 1
+                    cursor_x = cursor_x - 8
+                    write("VOLATILE", cmd_base + cmd_len, 0)
+                    # Erase only the cell under the cursor (the deleted char).
+                    # Prompt stays at column 0; text is redrawn from column 8.
+                    clear_cell(cursor_x, cursor_y)
+                    # Also wipe any leftover cells to the right of the new end.
+                    bx = cursor_x
+                    while bx < 320:
+                        clear_cell(bx, cursor_y)
+                        bx = bx + 8
+                    clear_cell(0, cursor_y)
+                    put_tile(cur_tile, 0, cursor_y)
+                    if cmd_len > 0:
+                        draw_string(cmd_base, cmd_len, 8, cursor_y)
+
+            elif key != 0:
+                put_char(key, cursor_x, cursor_y)
+                write("VOLATILE", cmd_base + cmd_len, key)
+                cmd_len = cmd_len + 1
+                cursor_x = cursor_x + 8
+
+        frameBlit()
+
+# Entry point
+setStackPointer(0x7F00)
+boot()
