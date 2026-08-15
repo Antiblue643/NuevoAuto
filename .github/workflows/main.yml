@@ -1,0 +1,22 @@
+name: Sync Docs to Wiki
+
+on:
+  push:
+    branches:
+      - main # Change to your default branch name if different
+    paths:
+      - 'docs/**' # Only runs when files in the docs folder change
+
+jobs:
+  sync-wiki:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Grants permissions to update the wiki repository
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Sync to GitHub Wiki
+        uses: Andrew-Chen-Wang/github-wiki-action@v4
+        with:
+          path: docs # Tells the action to pull from your docs folder
